@@ -1,0 +1,115 @@
+name: Get KernelSU Manager
+
+on:
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      kernelsu_variant:
+        type: choice
+        description: "选择 KernelSU 变体"
+        required: true
+        default: "Next"
+        options:
+          - "Next"
+          - "SukiSU"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  get_ksu_manager:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: sudo apt update && sudo apt install -y git curl jq
+
+      - name: 设定 KSU 环境变量
+        run: |
+          if [ "${{ github.event.inputs.kernelsu_variant || 'Next' }}" == "Next" ]; then
+            echo "This is the Next variant"
+            git clone https://github.com/KernelSU-Next/KernelSU-Next.git
+            cd KernelSU-Next
+            KSU_GIT_VERSION=$(git rev-list --count HEAD)
+            KSU_VERSION=$((10000 + KSU_GIT_VERSION + 200))
+            echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
+            echo "REPO=KernelSU-Next/KernelSU-Next" >> $GITHUB_ENV
+            echo "FILENAME=build-manager-ci.yml" >> $GITHUB_ENV
+          elif [ "${{ github.event.inputs.kernelsu_variant || 'Next' }}" == "SukiSU" ]; then
+            echo "This is the SukiSU variant"
+            git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
+            cd SukiSU-Ultra
+            KSU_GIT_VERSION=$(git rev-list --count HEAD)
+            KSU_VERSION=$((10000 + KSU_GIT_VERSION + 700))
+            echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
+            echo "REPO=SukiSU-Ultra/SukiSU-Ultra" >> $GITHUB_ENV
+            echo "FILENAME=build-manager.yml" >> $GITHUB_ENV
+          else
+            echo "Unknown variant"
+            exit 1
+          fi
+
+      - name: 获取最新构建的 Manager
+        run: |
+          # 获取最新成功构建的 ID
+          BUILD_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          "https://api.github.com/repos/$REPO/actions/workflows/$FILENAME/runs?status=success&per_page=1" | \
+          jq -r '.workflow_runs[0].id')
+          echo "BUILD_ID=$BUILD_ID"
+          
+          # 获取该构建的 Artifacts
+          ARTIFACTS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/$REPO/actions/runs/$BUILD_ID/artifacts")
+          echo "ARTIFACTS_COUNT=$(echo "$ARTIFACTS" | jq -r '.artifacts | length')"
+          
+          # 获取 Manager 文件的下载链接
+          DOWNLOAD_URL=$(echo "$ARTIFACTS" | jq -r '.artifacts[] | select(.name | contains("Manager")) | .archive_download_url')
+          echo "DOWNLOAD_URL=$DOWNLOAD_URL"
+          
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" == "null" ]; then
+            echo "错误：未找到 Manager 文件"
+            exit 1
+          fi
+
+          # 下载 Manager 文件
+          curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "manager.zip" "$DOWNLOAD_URL"
+          echo "Manager 文件下载完成"
+          
+          # 解压文件
+          unzip -o manager.zip -d manager_files/
+          echo "文件解压完成"
+          
+          # 查找 APK 文件
+          find manager_files/ -name "*.apk" -exec cp {} ./ \;
+          APK_FILE=$(find . -maxdepth 1 -name "*.apk" | head -1)
+          echo "APK_FILE=$APK_FILE" >> $GITHUB_ENV
+
+      - name: 显示文件信息
+        run: |
+          echo "找到的 APK 文件："
+          ls -la *.apk || echo "未找到 APK 文件"
+          echo "Manager 版本：$KSU_VERSION"
+
+      - name: 上传编译资产
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.kernelsu_variant || 'Next' }}-Manager-${{ env.KSU_VERSION }}
+          path: "*.apk"
+          retention-days: 30
+
+      - name: 显示完成信息
+        run: |
+          echo "========================================"
+          echo "✅ KernelSU Manager 获取完成！"
+          echo "🔧 变体: ${{ github.event.inputs.kernelsu_variant || 'Next' }}"
+          echo "📱 版本: ${{ env.KSU_VERSION }}"
+          echo "📦 文件: ${{ env.APK_FILE }}"
+          echo "========================================"
